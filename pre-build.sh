@@ -1,29 +1,32 @@
 #!/bin/bash
 set -e
 
-# Ждём появления исходников OpenVPN
-echo "Ожидание появления директории openvpn-2.6.14..."
-until [ -d trunk/user/openvpn/openvpn-2.6.14 ]; do
-    sleep 2
+OPENVPN_DIR="trunk/user/openvpn-2.6.14"
+PATCH_URL_BASE="https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches"
+PATCHES=(02-XOR.patch 03-XOR-define.patch 04-XOR-verify.patch 05-XOR-digest.patch 06-XOR-negotiation.patch)
+
+echo "🔧 pre-build.sh: ожидание директории $OPENVPN_DIR (макс. 3 мин)..."
+
+for i in {1..18}; do
+  if [ -d "$OPENVPN_DIR" ]; then
+    echo "✅ Найдена директория $OPENVPN_DIR"
+    break
+  fi
+  sleep 10
 done
 
-cd trunk/user/openvpn/openvpn-2.6.14
+if [ ! -d "$OPENVPN_DIR" ]; then
+  echo "❌ Директория $OPENVPN_DIR не найдена. Завершение."
+  exit 1
+fi
 
-# Массив имён патчей
-patches=(
-    "02-tunnelblick-openvpn_xorpatch-a.diff"
-    "03-tunnelblick-openvpn_xorpatch-b.diff"
-    "04-tunnelblick-openvpn_xorpatch-c.diff"
-    "05-tunnelblick-openvpn_xorpatch-d.diff"
-    "06-tunnelblick-openvpn_xorpatch-e.diff"
-)
+cd "$OPENVPN_DIR"
+echo "📥 Загрузка и применение XOR-патчей:"
 
-echo "Загрузка и применение XOR-патчей Tunnelblick..."
-for patch in "${patches[@]}"; do
-    echo "  -> Загрузка $patch"
-    wget -q "https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/$patch" -O "$patch"
-    echo "  -> Применение $patch"
-    patch -p1 < "$patch"
+for PATCH in "${PATCHES[@]}"; do
+  echo "➕ Применение $PATCH..."
+  curl -fsSL "$PATCH_URL_BASE/$PATCH" -o "$PATCH"
+  patch -p1 < "$PATCH"
 done
 
-echo "✅ Все патчи успешно применены!"
+echo "✅ Патчи применены успешно."
