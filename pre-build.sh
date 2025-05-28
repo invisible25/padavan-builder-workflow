@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-OPENVPN_DIR="trunk/user/openvpn-2.6.14"
+OPENVPN_DIR="trunk/user/openvpn/openvpn-2.6.14"
 PATCH_URL_BASE="https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches"
 PATCHES=(02-XOR.patch 03-XOR-define.patch 04-XOR-verify.patch 05-XOR-digest.patch 06-XOR-negotiation.patch)
 
@@ -29,4 +29,4 @@ for PATCH in "${PATCHES[@]}"; do
   patch -p1 < "$PATCH"
 done
 
-echo "✅ Патчи применены успешно."
+echo "✅ Патчи успешно применены."
