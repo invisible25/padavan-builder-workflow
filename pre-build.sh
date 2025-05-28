@@ -1,32 +1,16 @@
 #!/bin/bash
 set -e
 
-OPENVPN_DIR="trunk/user/openvpn/openvpn-2.6.14"
-PATCH_URL_BASE="https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches"
-PATCHES=(02-XOR.patch 03-XOR-define.patch 04-XOR-verify.patch 05-XOR-digest.patch 06-XOR-negotiation.patch)
+cd padavan-ng/trunk/user/openvpn/openvpn-2.6.14
 
-echo "🔧 pre-build.sh: ожидание директории $OPENVPN_DIR (макс. 3 мин)..."
+wget https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/02-tunnelblick-openvpn_xorpatch-a.diff
+wget https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/03-tunnelblick-openvpn_xorpatch-b.diff
+wget https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/04-tunnelblick-openvpn_xorpatch-c.diff
+wget https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/05-tunnelblick-openvpn_xorpatch-d.diff
+wget https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/06-tunnelblick-openvpn_xorpatch-e.diff
 
-for i in {1..18}; do
-  if [ -d "$OPENVPN_DIR" ]; then
-    echo "✅ Найдена директория $OPENVPN_DIR"
-    break
-  fi
-  sleep 10
-done
-
-if [ ! -d "$OPENVPN_DIR" ]; then
-  echo "❌ Директория $OPENVPN_DIR не найдена. Завершение."
-  exit 1
-fi
-
-cd "$OPENVPN_DIR"
-echo "📥 Загрузка и применение XOR-патчей:"
-
-for PATCH in "${PATCHES[@]}"; do
-  echo "➕ Применение $PATCH..."
-  curl -fsSL "$PATCH_URL_BASE/$PATCH" -o "$PATCH"
-  patch -p1 < "$PATCH"
-done
-
-echo "✅ Патчи успешно применены."
+patch -p1 < 02-tunnelblick-openvpn_xorpatch-a.diff
+patch -p1 < 03-tunnelblick-openvpn_xorpatch-b.diff
+patch -p1 < 04-tunnelblick-openvpn_xorpatch-c.diff
+patch -p1 < 05-tunnelblick-openvpn_xorpatch-d.diff
+patch -p1 < 06-tunnelblick-openvpn_xorpatch-e.diff
