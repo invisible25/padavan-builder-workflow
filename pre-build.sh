@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-cd padavan-ng/trunk/user/openvpn/openvpn-2.6.17
+cd padavan-ng/trunk/user/openvpn/openvpn-2.6.15
 
 wget https://github.com/samanajd2/OpenVPN-XOR-windows/blob/master/Xor-Patches/02-tunnelblick-openvpn_xorpatch-a.diff
 wget https://github.com/samanajd2/OpenVPN-XOR-windows/blob/master/Xor-Patches/03-tunnelblick-openvpn_xorpatch-b.diff
