@@ -12,7 +12,7 @@ import struct
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime
 
 HEADER_FMT = '!IQ'
@@ -211,6 +211,8 @@ def print_tcp_total(totals):
 
 
 def run_tcp(args):
+    if args.timeout is None:
+        args.timeout = 0.5 if args.single_shot else 2.0
     stop_event = threading.Event()
     setup_signal_handler(stop_event)
     log_path = args.log or default_log_name('tcp', args.host, args.port)
@@ -218,6 +220,16 @@ def run_tcp(args):
     window = RollingWindow(args.window_size, args.window_seconds)
     totals = TotalStats()
     print(f'Logging to {log_path}')
+    if args.single_shot:
+        print(
+            f'Single-shot mode (timeout={args.timeout}s): each probe is effectively one SYN, '
+            'so the OS cannot mask loss by retransmitting. TIMEOUT/UNREACHABLE = loss.'
+        )
+    else:
+        print(
+            'Note: normal TCP retransmits lost SYNs, which can hide packet loss (shows OK). '
+            'If a lossy IP still shows 0% loss, re-run with --single-shot.'
+        )
 
     start = time.perf_counter()
     seq = 0
@@ -298,18 +310,33 @@ def print_udp_total(totals):
     )
 
 
-class UdpClientRun:
-    def __init__(self, args, sock, target, logger, window, totals):
+class ProbeRun:
+    """Send/receive engine shared by udp-client and dns modes.
+
+    build_packet(seq) -> (key, bytes): key uniquely identifies the probe and must
+        be recoverable from the reply. parse_key(data) -> key or None extracts it.
+    A packet resolves to exactly one terminal status: OK, LOST, or LATE.
+    """
+
+    FINALIZED_MAX = 4096  # bounds memory; only recent keys need LATE detection
+
+    def __init__(self, args, sock, target, logger, window, totals, build_packet, parse_key, print_window):
         self.args = args
         self.sock = sock
         self.target = target
         self.logger = logger
         self.window = window
         self.totals = totals
-        self.outstanding = {}
-        self.finalized = set()
-        padding_len = max(args.payload_size, HEADER_SIZE) - HEADER_SIZE
-        self.padding = b'\x00' * padding_len
+        self.build_packet = build_packet
+        self.parse_key = parse_key
+        self.print_window = print_window
+        self.outstanding = {}          # key -> (seq, send_ts_ns)
+        self.finalized = OrderedDict()  # key -> (seq, send_ts_ns), bounded FIFO
+
+    def _finalize(self, key, seq, send_ts_ns):
+        self.finalized[key] = (seq, send_ts_ns)
+        if len(self.finalized) > self.FINALIZED_MAX:
+            self.finalized.popitem(last=False)
 
     def _emit(self, seq, rtt_ms, status):
         print(f'[{console_timestamp()}] seq={seq:<6} {status:<6} rtt={fmt_rtt(rtt_ms)}')
@@ -317,89 +344,154 @@ class UdpClientRun:
         self.totals.add(seq, rtt_ms, status)
         summary = self.window.add(seq, rtt_ms, status)
         if summary:
-            print_udp_window(summary)
+            self.print_window(summary)
 
     def send_next(self, seq):
+        key, packet = self.build_packet(seq)
         send_ts_ns = time.perf_counter_ns()
         if self.args.drop_rate <= 0 or random.random() >= self.args.drop_rate:
-            packet = struct.pack(HEADER_FMT, seq, send_ts_ns) + self.padding
             self.sock.sendto(packet, self.target)
-        self.outstanding[seq] = send_ts_ns
+        self.outstanding[key] = (seq, send_ts_ns)
 
     def try_receive(self):
         try:
-            data, _addr = self.sock.recvfrom(2048)
+            data, _addr = self.sock.recvfrom(4096)
         except socket.timeout:
             return
         recv_ns = time.perf_counter_ns()
-        if len(data) < HEADER_SIZE:
+        key = self.parse_key(data)
+        if key is None:
             return
-        r_seq, r_send_ns = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
-        rtt_ms = (recv_ns - r_send_ns) / 1e6
-        status = 'LATE' if r_seq in self.finalized else 'OK'
-        self.outstanding.pop(r_seq, None)
-        self.finalized.add(r_seq)
-        self._emit(r_seq, rtt_ms, status)
+        if key in self.outstanding:
+            seq, send_ts_ns = self.outstanding.pop(key)
+            self._finalize(key, seq, send_ts_ns)
+            self._emit(seq, (recv_ns - send_ts_ns) / 1e6, 'OK')
+        elif key in self.finalized:
+            seq, send_ts_ns = self.finalized[key]
+            self._emit(seq, (recv_ns - send_ts_ns) / 1e6, 'LATE')
 
     def check_timeouts(self):
         now_ns = time.perf_counter_ns()
         timeout_ns = int(self.args.timeout * 1e9)
-        expired = [s for s, ts in self.outstanding.items() if now_ns - ts > timeout_ns]
-        for s in expired:
-            self.outstanding.pop(s)
-            self.finalized.add(s)
-            self._emit(s, None, 'LOST')
+        expired = [k for k, (s, ts) in self.outstanding.items() if now_ns - ts > timeout_ns]
+        for k in expired:
+            seq, send_ts_ns = self.outstanding.pop(k)
+            self._finalize(k, seq, send_ts_ns)
+            self._emit(seq, None, 'LOST')
 
     def finalize_remaining(self):
-        for s in list(self.outstanding.keys()):
-            self.outstanding.pop(s)
-            self.finalized.add(s)
-            self._emit(s, None, 'LOST')
+        for k in list(self.outstanding.keys()):
+            seq, send_ts_ns = self.outstanding.pop(k)
+            self._finalize(k, seq, send_ts_ns)
+            self._emit(seq, None, 'LOST')
 
 
-def run_udp_client(args):
+def make_udp_probe(args):
+    padding = b'\x00' * (max(args.payload_size, HEADER_SIZE) - HEADER_SIZE)
+
+    def build(seq):
+        key = seq & 0xFFFFFFFF
+        return key, struct.pack(HEADER_FMT, key, 0) + padding
+
+    def parse(data):
+        if len(data) < HEADER_SIZE:
+            return None
+        r_seq, _ = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+        return r_seq
+
+    return build, parse
+
+
+_DNS_LABEL_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+
+def _encode_qname(name):
+    out = b''
+    for label in name.split('.'):
+        if label:
+            raw = label.encode('ascii')
+            out += bytes([len(raw)]) + raw
+    return out + b'\x00'
+
+
+def make_dns_probe(args):
+    domain = args.query_domain
+
+    def build(seq):
+        txid = seq & 0xFFFF  # match reply by DNS transaction id (first 2 bytes)
+        label = ''.join(random.choice(_DNS_LABEL_CHARS) for _ in range(12))
+        header = struct.pack('!HHHHHH', txid, 0x0100, 1, 0, 0, 0)  # standard query, RD=1
+        question = _encode_qname(f'{label}.{domain}') + struct.pack('!HH', 1, 1)  # A, IN
+        return txid, header + question
+
+    def parse(data):
+        if len(data) < 2:
+            return None
+        return struct.unpack('!H', data[:2])[0]
+
+    return build, parse
+
+
+def _run_probe_loop(args, run, stop_event):
+    start = time.perf_counter()
+    end_time = start + args.duration if args.duration is not None else None
+    seq = 0
+    grace_deadline = None
+    while not stop_event.is_set():
+        can_send = (args.count is None or seq < args.count) and (end_time is None or time.perf_counter() < end_time)
+        if can_send:
+            tick_target = start + seq * args.interval
+            if time.perf_counter() >= tick_target:
+                run.send_next(seq)
+                seq += 1
+        else:
+            if grace_deadline is None:
+                grace_deadline = time.perf_counter() + args.timeout + 0.1
+            if not run.outstanding or time.perf_counter() >= grace_deadline:
+                break
+        run.try_receive()
+        run.check_timeouts()
+
+
+def _run_probe_mode(args, prefix, build, parse, banner):
     stop_event = threading.Event()
     setup_signal_handler(stop_event)
-    log_path = args.log or default_log_name('udp', args.host, args.port)
+    log_path = args.log or default_log_name(prefix, args.host, args.port)
     logger = CsvLogger(log_path)
     window = RollingWindow(args.window_size, args.window_seconds)
     totals = TotalStats()
     print(f'Logging to {log_path}')
+    if banner:
+        print(banner)
 
     infos = socket.getaddrinfo(args.host, args.port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
     family, socktype, proto, _canon, sockaddr = infos[0]
     sock = socket.socket(family, socktype, proto)
     sock.settimeout(0.05)
-
-    run = UdpClientRun(args, sock, sockaddr, logger, window, totals)
-
-    start = time.perf_counter()
-    end_time = start + args.duration if args.duration is not None else None
-    seq = 0
-    grace_deadline = None
-
+    run = ProbeRun(args, sock, sockaddr, logger, window, totals, build, parse, print_udp_window)
     try:
-        while not stop_event.is_set():
-            can_send = (args.count is None or seq < args.count) and (end_time is None or time.perf_counter() < end_time)
-            if can_send:
-                tick_target = start + seq * args.interval
-                if time.perf_counter() >= tick_target:
-                    run.send_next(seq)
-                    seq += 1
-            else:
-                if grace_deadline is None:
-                    grace_deadline = time.perf_counter() + args.timeout + 0.1
-                if not run.outstanding or time.perf_counter() >= grace_deadline:
-                    break
-
-            run.try_receive()
-            run.check_timeouts()
+        _run_probe_loop(args, run, stop_event)
     finally:
         run.finalize_remaining()
         if totals.total:
             print_udp_total(totals)
         logger.close()
         sock.close()
+
+
+def run_udp_client(args):
+    build, parse = make_udp_probe(args)
+    _run_probe_mode(args, 'udp', build, parse, None)
+
+
+def run_dns(args):
+    build, parse = make_dns_probe(args)
+    banner = (
+        'DNS probe mode: UDP DNS queries to the resolver, no app-level retransmission, '
+        'so real packet loss on the path (e.g. through your VPN tunnel) is visible. '
+        'LOST = no answer within timeout.'
+    )
+    _run_probe_mode(args, 'dns', build, parse, banner)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +509,10 @@ def build_parser():
     p_tcp.add_argument('--host', required=True)
     p_tcp.add_argument('--port', required=True, type=int)
     p_tcp.add_argument('--interval', type=float, default=1.0)
-    p_tcp.add_argument('--timeout', type=float, default=2.0)
+    p_tcp.add_argument('--timeout', type=float, default=None,
+                       help='seconds (default 2.0, or 0.5 with --single-shot)')
+    p_tcp.add_argument('--single-shot', action='store_true',
+                       help='short timeout so TCP retransmission cannot hide loss (use if a lossy IP shows 0%%)')
     p_tcp.add_argument('--count', type=int, default=None)
     p_tcp.add_argument('--log', default=None)
     p_tcp.add_argument('--window-size', type=int, default=20)
@@ -442,6 +537,21 @@ def build_parser():
     p_udpc.add_argument('--window-seconds', type=float, default=10.0)
     p_udpc.add_argument('--drop-rate', type=float, default=0.0, help=argparse.SUPPRESS)
     p_udpc.set_defaults(func=run_udp_client)
+
+    p_dns = sub.add_parser('dns', help='UDP DNS probe to a public resolver - real loss without your own server')
+    p_dns.add_argument('--host', required=True, help='resolver IP, e.g. 8.8.8.8 or 1.1.1.1')
+    p_dns.add_argument('--port', type=int, default=53)
+    p_dns.add_argument('--interval', type=float, default=0.2)
+    p_dns.add_argument('--timeout', type=float, default=1.0)
+    p_dns.add_argument('--duration', type=float, default=None)
+    p_dns.add_argument('--count', type=int, default=None)
+    p_dns.add_argument('--query-domain', default='example.com',
+                       help='a random label is prepended to this name each probe (default example.com)')
+    p_dns.add_argument('--log', default=None)
+    p_dns.add_argument('--window-size', type=int, default=20)
+    p_dns.add_argument('--window-seconds', type=float, default=10.0)
+    p_dns.add_argument('--drop-rate', type=float, default=0.0, help=argparse.SUPPRESS)
+    p_dns.set_defaults(func=run_dns)
 
     return parser
 
