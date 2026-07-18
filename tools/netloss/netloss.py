@@ -447,6 +447,12 @@ def build_parser():
 
 
 def main():
+    # Line-buffer stdout so per-packet lines appear in real time even when the
+    # output is piped to a file (Windows block-buffers redirected stdout otherwise).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     args = build_parser().parse_args()
     args.func(args)
 
