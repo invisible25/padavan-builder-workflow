@@ -9,6 +9,9 @@ permissions:
 on:
   push:
     branches: ["ccr-4fe5c52b-absjlg"]
+    paths:
+      - "patches/openvpn-xor-scramble.patch"
+      - ".github/workflows/ics-openvpn-xor.yml"
   workflow_dispatch:
 
 jobs:
