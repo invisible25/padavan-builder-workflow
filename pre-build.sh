@@ -8,12 +8,11 @@
 # a matching XOR-patched OpenVPN with the same `scramble` setting.
 set -e
 
-NEWVER="2.6.23"
+NEWVER="2.7.8"
 REPO_ROOT="$(pwd)"
 XOR_PATCHES="${REPO_ROOT}/patches/openvpn-xor-${NEWVER}"
 
 cd padavan-ng/trunk/user/openvpn
-OVPN_PKG_DIR="$(pwd)"
 
 # Drop whatever OpenVPN source padavan-ng bundles (any version but our target),
 # so we build exactly the version we vendor below.
@@ -35,9 +34,13 @@ tar -xf "openvpn-${NEWVER}.tar.gz"
 # archive extracts as openvpn-<ver> already; normalise just in case
 [ -d "openvpn-${NEWVER}" ] || mv openvpn-* "openvpn-${NEWVER}"
 
-# padavan's own tree trim (same patch the Makefile applies on a fresh extract).
-# Absolute path: `patch -d` chdirs into the target before reading a relative -i.
-patch -d "openvpn-${NEWVER}" -p1 -i "${OVPN_PKG_DIR}/openvpn-orig.patch"
+# padavan's openvpn-orig.patch trims sample/doc/tests from the build (they break
+# the cross-compile), but it is pinned to the 2.6 Makefile.am SUBDIRS layout.
+# Do the same trim version-agnostically so it works across OpenVPN releases.
+sed -i 's/ sample doc tests//' "openvpn-${NEWVER}/Makefile.am"
+if grep -qE '^SUBDIRS =.*(sample|doc|tests)' "openvpn-${NEWVER}/Makefile.am"; then
+  echo "ERROR: failed to trim sample/doc/tests from Makefile.am SUBDIRS"; exit 1
+fi
 
 # XOR / scramble obfuscation (Tunnelblick patch set matched to ${NEWVER}).
 for p in \
