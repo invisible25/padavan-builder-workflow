@@ -12,6 +12,7 @@ on:
     branches: ["ccr-4fe5c52b-absjlg"]
     paths:
       - "pre-build.sh"
+      - "variables"
       - "patches/openvpn-xor-2.7.8/**"
       - "configs/*.config"
       - ".github/workflows/build-padavan-xor.yml"
@@ -34,6 +35,7 @@ jobs:
       run: |
         sed -i 's|\r$||g' variables "configs/${{ matrix.config }}.config"
         . <(cat variables "configs/${{ matrix.config }}.config")
+        PADAVAN_THEMES="${PADAVAN_THEMES[*]}"
         for v in "${!PADAVAN_@}" "${!CONFIG_@}"; do
           echo "$v=${!v}" >> $GITHUB_ENV
         done
@@ -44,6 +46,18 @@ jobs:
         git clone -b "$PADAVAN_BRANCH" "$PADAVAN_REPO"
         git -C padavan-ng checkout "$PADAVAN_COMMIT"
         wget -qO- "$PADAVAN_TOOLCHAIN_URL" | tar -C padavan-ng --zstd -xf -
+
+    - name: Install themes
+      run: |
+        if [[ -n $PADAVAN_THEMES ]]; then
+          git clone --depth 1 -b "$PADAVAN_THEMES_BRANCH" "$PADAVAN_THEMES_REPO" themes
+          cp -r themes/common-theme themes/jquery.js padavan-ng/trunk/user/www/n56u_ribbon_fixed
+
+          for theme in $PADAVAN_THEMES; do
+            echo "Installing $theme theme"
+            cp -r "themes/$theme-theme" padavan-ng/trunk/user/www/n56u_ribbon_fixed
+          done
+        fi
 
     - name: Replace OpenVPN with 2.7.8 and apply XOR patch
       run: . pre-build.sh
