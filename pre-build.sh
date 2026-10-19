@@ -8,7 +8,7 @@
 # a matching XOR-patched OpenVPN with the same `scramble` setting.
 set -e
 
-NEWVER="2.7.8"
+NEWVER="${OPENVPN_VERSION:-2.7.8}"
 REPO_ROOT="$(pwd)"
 XOR_PATCHES="${REPO_ROOT}/patches/openvpn-xor-${NEWVER}"
 

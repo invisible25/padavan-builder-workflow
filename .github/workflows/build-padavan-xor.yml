@@ -8,12 +8,18 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      openvpn_version:
+        description: "OpenVPN version to build in (XOR patch set must exist in patches/openvpn-xor-<version>/)"
+        type: choice
+        options: ["2.7.8", "2.6.23"]
+        default: "2.7.8"
   push:
     branches: ["ccr-4fe5c52b-absjlg"]
     paths:
       - "pre-build.sh"
       - "variables"
-      - "patches/openvpn-xor-2.7.8/**"
+      - "patches/openvpn-xor-*/**"
       - "configs/*.config"
       - ".github/workflows/build-padavan-xor.yml"
 
@@ -23,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     container: registry.gitlab.com/hadzhioglu/padavan-ng
     defaults: { run: { shell: bash } }
+    env:
+      OPENVPN_VERSION: ${{ inputs.openvpn_version || '2.7.8' }}
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +67,7 @@ jobs:
           done
         fi
 
-    - name: Replace OpenVPN with 2.7.8 and apply XOR patch
+    - name: Replace OpenVPN (${{ env.OPENVPN_VERSION }}) and apply XOR patch
       run: . pre-build.sh
 
     - name: Build firmware
@@ -87,7 +95,7 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: padavan-xor-openvpn278-${{ matrix.config }}
+        name: padavan-xor-openvpn${{ env.OPENVPN_VERSION }}-${{ matrix.config }}
         retention-days: 7
         path: |
           padavan-ng/trunk/images/${{ env.FW_FILE_NAME }}
